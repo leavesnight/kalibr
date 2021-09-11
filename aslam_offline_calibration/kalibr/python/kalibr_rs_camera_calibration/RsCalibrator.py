@@ -198,7 +198,7 @@ class RsCalibrator(object):
         """Estimate the pose of the camera with a PnP solver. Call after initializing the intrinsics"""
         # estimate and set T_c in the observations
         for idx, observation in enumerate(self.__observations):
-            (success, T_t_c) = self.__camera.estimateTransformation(observation)
+            (success, T_t_c) = self.__camera.estimateTran`sformation(observation)
             if (success):
                 observation.set_T_t_c(T_t_c)
             else:

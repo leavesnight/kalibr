@@ -7,7 +7,8 @@ from kalibr_imu_camera_calibration import *
 import numpy as np
 import argparse
 import signal
-import sys   
+import sys
+import os
 
 # make numpy print prettier
 np.set_printoptions(suppress=True)
@@ -103,6 +104,13 @@ def parseArgs():
      
     outputSettings.add_argument('--export-poses', action='store_true', dest='exportPoses', help='Also export the optimized poses.')
 
+    #added by zzh
+    outputSettings.add_argument('--bagIsPoseOfHandlerID', type = int, default = -1, dest='posesID', help='Input handler poses ID instead of cam handler images', required=False)
+    outputSettings.add_argument('--imus-file', dest='imusfile', help='Input imu file instead of ros bag', action=Once, required=False)
+    outputSettings.add_argument('--camposes-file', default="", dest='camposesfile', help='Input cam/slam poses instead of cam images', action=Once, required=False)
+    outputSettings.add_argument('--FixRcbPrior', action="store_true", default = False, dest='bfixed', help='not fixed means: find prior Rc0b0 through angular velocity', required=False)
+    #end addition
+
     #print help if no argument is specified
     if len(sys.argv)==1:
         parser.print_help()
@@ -160,16 +168,16 @@ def main():
         else:
             sm.logError("Model {0} is currently unsupported.".format(imu_model))
             sys.exit(2)
-    
-    #load calibration target configuration 
+
+    #load calibration target configuration
     targetConfig = kc.CalibrationTargetParameters(parsed.target_yaml)
-       
+
     print("Initializing calibration target:")
     targetConfig.printDetails()
-    
+
     print("Initializing camera chain:")
-    chain = kc.CameraChainParameters(parsed.chain_yaml)      
-    chain.printDetails()   
+    chain = kc.CameraChainParameters(parsed.chain_yaml)
+    chain.printDetails()
     camChain = sens.IccCameraChain(chain, targetConfig, parsed)
 
     #create a calibrator instance
@@ -180,7 +188,7 @@ def main():
     for imu in imus:
         iCal.registerImu(imu)
         if imu is not imus[0]:
-            imu.findOrientationPrior(imus[0])
+            imu.findOrientationPrior(imus[0])#, bfixed=parsed.bfixed
 
     print()
     print("Building the problem")
@@ -196,6 +204,7 @@ def main():
                       noChainExtrinsics=(not parsed.recompute_chain_extrinsics),
                       maxIterations=parsed.max_iter,
                       timeOffsetPadding=parsed.timeoffset_padding,
+                      bfixed = parsed.bfixed,
                       verbose = parsed.verbose)
 
     print()
@@ -214,7 +223,9 @@ def main():
     util.printResults(iCal, withCov=parsed.recover_cov)
 
     print()
-    bagtag = parsed.bagfile[0].translate("<>:/\|?*").replace('.bag', '', 1)
+    bagtag = os.path.basename(parsed.bagfile[0])
+    bagtag = bagtag.translate("<>:/\|?*").replace('.bag', '', 1)
+    bagtag = bagtag.translate("<>:/\|?*").replace('.txt', '', 1)
     yamlFilename = "camchain-imucam-" + bagtag + ".yaml"
     iCal.saveCamChainParametersYaml(yamlFilename)
     print("  Saving camera chain calibration to file: {0}".format(yamlFilename))

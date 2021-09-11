@@ -3,8 +3,10 @@ project(ethz_apriltag2)
 
 add_definitions(-fPIC -O3)
 
+LIST(APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake_modules)
+
 find_package(catkin REQUIRED)
-find_package(Eigen3 REQUIRED)
+find_package(Eigen3 3.3.1 REQUIRED)
 find_package(OpenCV REQUIRED)
 
 catkin_package(

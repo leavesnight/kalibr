@@ -15,6 +15,10 @@ import numpy as np
 import pylab as pl
 import scipy.optimize
 
+import re
+
+CoeffNanoToSecond = 1.e-6
+GravityNorm = 9.7964#9.80665
 
 def initCameraBagDataset(bagfile, topic, from_to=None, perform_synchronization=False):
     print("Initializing camera rosbag dataset reader:")
@@ -39,49 +43,52 @@ def initImuBagDataset(bagfile, topic, from_to=None, perform_synchronization=Fals
 class IccCamera():
     def __init__(self, camConfig, targetConfig, dataset, reprojectionSigma=1.0, showCorners=True, \
                  showReproj=True, showOneStep=False):
-        
+
         #store the configuration
         self.dataset = dataset
         self.camConfig = camConfig
         self.targetConfig = targetConfig
-        
+
         # Corner uncertainty
         self.cornerUncertainty = reprojectionSigma
 
         #set the extrinsic prior to default
         self.T_extrinsic = sm.Transformation()
-         
+
         #initialize timeshift prior to zero
         self.timeshiftCamToImuPrior = 0.0
-        
+
         #initialize the camera data
         self.camera = kc.AslamCamera.fromParameters( camConfig )
-        
+
         #extract corners
         self.setupCalibrationTarget( targetConfig, showExtraction=showCorners, showReproj=showReproj, imageStepping=showOneStep )
         multithreading = not (showCorners or showReproj or showOneStep)
-        self.targetObservations = kc.extractCornersFromDataset(self.dataset, self.detector, multithreading=multithreading)
-        
-        #an estimate of the gravity in the world coordinate frame  
-        self.gravity_w = np.array([9.80655, 0., 0.])
-        
+        if self.dataset:
+            self.targetObservations = kc.extractCornersFromDataset(self.dataset, self.detector, multithreading=multithreading)
+        else:
+            self.targetObservations = []
+
+        #an estimate of the gravity in the world coordinate frame
+        self.gravity_w = np.array([GravityNorm, 0., 0.])
+
     def setupCalibrationTarget(self, targetConfig, showExtraction=False, showReproj=False, imageStepping=False):
-        
+
         #load the calibration target configuration
         targetParams = targetConfig.getTargetParams()
         targetType = targetConfig.getTargetType()
-    
+
         if targetType == 'checkerboard':
-            options = acv.CheckerboardOptions() 
+            options = acv.CheckerboardOptions()
             options.filterQuads = True
             options.normalizeImage = True
-            options.useAdaptiveThreshold = True        
+            options.useAdaptiveThreshold = True
             options.performFastCheck = False
             options.windowWidth = 5
             options.showExtractionVideo = showExtraction
-            grid = acv.GridCalibrationTargetCheckerboard(targetParams['targetRows'], 
-                                                            targetParams['targetCols'], 
-                                                            targetParams['rowSpacingMeters'], 
+            grid = acv.GridCalibrationTargetCheckerboard(targetParams['targetRows'],
+                                                            targetParams['targetCols'],
+                                                            targetParams['rowSpacingMeters'],
                                                             targetParams['colSpacingMeters'],
                                                             options)
         elif targetType == 'circlegrid':
@@ -89,34 +96,34 @@ class IccCamera():
             options.showExtractionVideo = showExtraction
             options.useAsymmetricCirclegrid = targetParams['asymmetricGrid']
             grid = acv.GridCalibrationTargetCirclegrid(targetParams['targetRows'],
-                                                          targetParams['targetCols'], 
-                                                          targetParams['spacingMeters'], 
+                                                          targetParams['targetCols'],
+                                                          targetParams['spacingMeters'],
                                                           options)
         elif targetType == 'aprilgrid':
-            options = acv_april.AprilgridOptions() 
+            options = acv_april.AprilgridOptions()
             options.showExtractionVideo = showExtraction
             options.minTagsForValidObs = int( np.max( [targetParams['tagRows'], targetParams['tagCols']] ) + 1 )
-            
+
             grid = acv_april.GridCalibrationTargetAprilgrid(targetParams['tagRows'],
-                                                            targetParams['tagCols'], 
-                                                            targetParams['tagSize'], 
-                                                            targetParams['tagSpacing'], 
+                                                            targetParams['tagCols'],
+                                                            targetParams['tagSize'],
+                                                            targetParams['tagSpacing'],
                                                             options)
         else:
             raise RuntimeError( "Unknown calibration target." )
-                          
-        options = acv.GridDetectorOptions() 
+
+        options = acv.GridDetectorOptions()
         options.imageStepping = imageStepping
         options.plotCornerReprojection = showReproj
         options.filterCornerOutliers = True
         #options.filterCornerSigmaThreshold = 2.0
         #options.filterCornerMinReprojError = 0.2
-        self.detector = acv.GridDetector(self.camera.geometry, grid, options)        
+        self.detector = acv.GridDetector(self.camera.geometry, grid, options)
 
-    def findOrientationPriorCameraToImu(self, imu):
+    def findOrientationPriorCameraToImu(self, imu, bfixed = False):
         print()
         print("Estimating imu-camera rotation prior")
-        
+
         # build the problem
         problem = aopt.OptimizationProblem()
 
@@ -129,34 +136,35 @@ class IccCamera():
         gyroBiasDv = aopt.EuclideanPointDv( np.zeros(3) )
         gyroBiasDv.setActive( True )
         problem.addDesignVariable(gyroBiasDv)
-        
+
         #initialize a pose spline using the camera poses
         poseSpline = self.initPoseSplineFromCamera( timeOffsetPadding=0.0 )
-        
+
         for im in imu.imuData:
             tk = im.stamp.toSec()
-            if tk > poseSpline.t_min() and tk < poseSpline.t_max():        
+            if tk > poseSpline.t_min() and tk < poseSpline.t_max():
                 #DV expressions
                 R_i_c = q_i_c_Dv.toExpression()
-                bias = gyroBiasDv.toExpression()   
-                
+                bias = gyroBiasDv.toExpression()
+
                 #get the vision predicted omega and measured omega (IMU)
                 omega_predicted = R_i_c * aopt.EuclideanExpression( np.matrix( poseSpline.angularVelocityBodyFrame( tk ) ).transpose() )
                 omega_measured = im.omega
-                
+                #print(tk, omega_measured, omega_predicted.toEuclidean(), sm.RotationVector().rotationMatrixToParameters(poseSpline.orientation(tk)))
+
                 #error term
                 gerr = ket.GyroscopeError(omega_measured, im.omegaInvR, omega_predicted, bias)
                 problem.addErrorTerm(gerr)
-        
+
         if problem.numErrorTerms() == 0:
             sm.logFatal("Failed to obtain orientation prior. "\
                         "Please make sure that your sensors are synchronized correctly.")
             sys.exit(-1)
 
-        
-        #define the optimization 
+
+        #define the optimization
         options = aopt.Optimizer2Options()
-        options.verbose = False
+        options.verbose = True#False
         options.linearSolver = aopt.BlockCholeskyLinearSystemSolver()
         options.nThreads = 2
         options.convergenceDeltaX = 1e-4
@@ -166,10 +174,11 @@ class IccCamera():
         #run the optimization
         optimizer = aopt.Optimizer2(options)
         optimizer.setProblem(problem)
-        
+
         #get the prior
         try:
-            optimizer.optimize()
+            if not bfixed:
+                optimizer.optimize()
         except:
             sm.logFatal("Failed to obtain orientation prior!")
             sys.exit(-1)
@@ -184,25 +193,30 @@ class IccCamera():
             tk = im.stamp.toSec()
             if tk > poseSpline.t_min() and tk < poseSpline.t_max():
                 a_w.append(np.dot(poseSpline.orientation(tk), np.dot(R_i_c, - im.alpha)))
+                #print(tk, poseSpline.position(tk), sm.RotationVector().rotationMatrixToParameters(poseSpline.orientation(tk)))
         mean_a_w = np.mean(np.asarray(a_w).T, axis=1)
-        self.gravity_w = mean_a_w / np.linalg.norm(mean_a_w) * 9.80655
-        print("Gravity was intialized to", self.gravity_w, "[m/s^2]") 
+        self.gravity_w = mean_a_w / np.linalg.norm(mean_a_w) * GravityNorm
+        print("Gravity was intialized to", self.gravity_w, "[m/s^2]")
 
         #set the gyro bias prior (if we have more than 1 cameras use recursive average)
-        b_gyro = bias.toEuclidean() 
+        b_gyro = bias.toEuclidean()
         imu.GyroBiasPriorCount += 1
         imu.GyroBiasPrior = (imu.GyroBiasPriorCount-1.0)/imu.GyroBiasPriorCount * imu.GyroBiasPrior + 1.0/imu.GyroBiasPriorCount*b_gyro
 
         #print result
-        print("  Orientation prior camera-imu found as: (T_i_c)")
+        print("  Orientation prior camera-imu found as: (T_c_i)")
         print(R_i_c)
+        #R_i_c = np.array([[0.89170425, -0.42365166,  0.15931981], [-0.4478458,  -0.87681817,  0.17499726], [0.06555662, -0.2273965,  -0.9715931]])
+        #print(R_i_c.transpose())
+        print(" ric=")
+        print(sm.RotationVector().rotationMatrixToParameters(R_i_c.transpose()))
         print("  Gyro bias prior found as: (b_gyro)")
         print(b_gyro)
-    
+
     #return an etimate of gravity in the world coordinate frame as perceived by this camera
     def getEstimatedGravity(self):
         return self.gravity_w
-        
+
     #estimates the timeshift between the camearas and the imu using a crosscorrelation approach
     #
     #approach: angular rates are constant on a fixed body independent of location
@@ -214,19 +228,23 @@ class IccCamera():
     #          in a next step we can use the time shift to estimate the rotation between camera and imu
     def findTimeshiftCameraImuPrior(self, imu, verbose=False):
         print("Estimating time shift camera to imu:")
-        
+
         #fit a spline to the camera observations
         poseSpline = self.initPoseSplineFromCamera( timeOffsetPadding=0.0 )
-        
-        #predict time shift prior 
+
+        #predict time shift prior
         t=[]
         omega_measured_norm = []
         omega_predicted_norm = []
-        
+
+        oldtk = 0
         for im in imu.imuData:
             tk = im.stamp.toSec()
+            #if tk - oldtk > 0.002:
+            #print(im.stamp.toSec(), im.alpha, im.omega)
+            oldtk = tk
             if tk > poseSpline.t_min() and tk < poseSpline.t_max():
-                
+
                 #get imu measurements and spline from camera
                 omega_measured = im.omega
                 omega_predicted = aopt.EuclideanExpression( np.matrix( poseSpline.angularVelocityBodyFrame( tk ) ).transpose() )
@@ -235,21 +253,33 @@ class IccCamera():
                 t = np.hstack( (t, tk) )
                 omega_measured_norm = np.hstack( (omega_measured_norm, np.linalg.norm( omega_measured ) ))
                 omega_predicted_norm = np.hstack( (omega_predicted_norm, np.linalg.norm( omega_predicted.toEuclidean() )) )
-        
+
         if len(omega_predicted_norm) == 0 or len(omega_measured_norm) == 0:
             sm.logFatal("The time ranges of the camera and IMU do not overlap. "\
                         "Please make sure that your sensors are synchronized correctly.")
             sys.exit(-1)
-        
+
         #get the time shift
+        num_data = np.size(omega_measured_norm)
+        #omega_measured_norm = omega_measured_norm - omega_measured_norm.mean()
+        #omega_predicted_norm = omega_predicted_norm - omega_predicted_norm.mean()
         corr = np.correlate(omega_predicted_norm, omega_measured_norm, "full")
-        discrete_shift = corr.argmax() - (np.size(omega_measured_norm) - 1)
-        
+        #corr_avg = corr/np.append(np.arange(1,num_data+1),np.arange(num_data-1,0,-1))
+        #corr_avg = corr / (num_data - np.arange(-num_data+1,num_data,1))
         #get cont. time shift
         times = [im.stamp.toSec() for im in imu.imuData]
         dT = np.mean(np.diff( times ))
+        #max_shift = int(1/dT+0.5)
+        #if max_shift > num_data - 1:
+        max_shift = num_data - 1
+        #corr = corr_avg[num_data - 1 - max_shift:num_data - 1 + max_shift]
+        discrete_shift = corr.argmax() - max_shift
+        #print(corr[max_shift -5:max_shift+5])
+        #print(dT)
+        #print(discrete_shift)
+
         shift = -discrete_shift*dT
-        
+
         #Create plots
         if verbose:
             pl.plot(t, omega_measured_norm, label="measured_raw")
@@ -264,30 +294,35 @@ class IccCamera():
             sm.logDebug("discrete time shift: {0}".format(discrete_shift))
             sm.logDebug("cont. time shift: {0}".format(shift))
             sm.logDebug("dT: {0}".format(dT))
-        
+
         #store the timeshift (t_imu = t_cam + timeshiftCamToImuPrior)
         self.timeshiftCamToImuPrior = shift
-        
+
         print("  Time shift camera to imu (t_imu = t_cam + shift):")
         print(self.timeshiftCamToImuPrior)
-        
+
     #initialize a pose spline using camera poses (pose spline = T_wb)
     def initPoseSplineFromCamera(self, splineOrder=6, poseKnotsPerSecond=100, timeOffsetPadding=0.02):
-        T_c_b = self.T_extrinsic.T()        
+        T_c_b = self.T_extrinsic.T()
+        print(T_c_b)
         pose = bsplines.BSplinePose(splineOrder, sm.RotationVector() )
-                
+
         # Get the checkerboard times.
-        times = np.array([obs.time().toSec()+self.timeshiftCamToImuPrior for obs in self.targetObservations ])                 
+        times = np.array([obs.time().toSec()+self.timeshiftCamToImuPrior for obs in self.targetObservations ])
+        #print(times)
         curve = np.matrix([ pose.transformationToCurveValue( np.dot(obs.T_t_c().T(), T_c_b) ) for obs in self.targetObservations]).T
-        
+        #for obs in self.targetObservations:
+        #obs = self.targetObservations[0]
+        #print(obs.time().toSec(), obs.T_t_c().T()[0:3,3], sm.RotationVector().rotationMatrixToParameters(obs.T_t_c().T()[0:3,0:3]))
+
         if np.isnan(curve).any():
             raise RuntimeError("Nans in curve values")
             sys.exit(0)
-        
+
         # Add 2 seconds on either end to allow the spline to slide during optimization
         times = np.hstack((times[0] - (timeOffsetPadding * 2.0), times, times[-1] + (timeOffsetPadding * 2.0)))
         curve = np.hstack((curve[:,0], curve, curve[:,-1]))
-        
+
         # Make sure the rotation vector doesn't flip
         for i in range(1,curve.shape[1]):
             previousRotationVector = curve[3:6,i-1]
@@ -296,7 +331,7 @@ class IccCamera():
             axis = r/angle
             best_r = r
             best_dist = np.linalg.norm( best_r - previousRotationVector)
-            
+
             for s in range(-3,4):
                 aa = axis * (angle + math.pi * 2.0 * s)
                 dist = np.linalg.norm( aa - previousRotationVector )
@@ -304,48 +339,49 @@ class IccCamera():
                     best_r = aa
                     best_dist = dist
             curve[3:6,i] = best_r;
-            
+
         seconds = times[-1] - times[0]
         knots = int(round(seconds * poseKnotsPerSecond))
-        
+
         print()
         print("Initializing a pose spline with %d knots (%f knots per second over %f seconds)" % ( knots, poseKnotsPerSecond, seconds))
         pose.initPoseSplineSparse(times, curve, knots, 1e-4)
         return pose
-    
+
     def addDesignVariables(self, problem, noExtrinsics=True, noTimeCalibration=True, baselinedv_group_id=ic.HELPER_GROUP_ID):
         # Add the calibration design variables.
         active = not noExtrinsics
         self.T_c_b_Dv = aopt.TransformationDv(self.T_extrinsic, rotationActive=active, translationActive=active)
         for i in range(0, self.T_c_b_Dv.numDesignVariables()):
             problem.addDesignVariable(self.T_c_b_Dv.getDesignVariable(i), baselinedv_group_id)
-        
+
         # Add the time delay design variable.
         self.cameraTimeToImuTimeDv = aopt.Scalar(0.0)
         self.cameraTimeToImuTimeDv.setActive( not noTimeCalibration )
         problem.addDesignVariable(self.cameraTimeToImuTimeDv, ic.CALIBRATION_GROUP_ID)
-        
-    def addCameraErrorTerms(self, problem, poseSplineDv, T_cN_b, blakeZissermanDf=0.0, timeOffsetPadding=0.0):
-        print()
-        print("Adding camera error terms ({0})".format(self.dataset.topic))
-        
+
+    def addCameraErrorTerms(self, problem, poseSplineDv, T_cN_b, R_cN_b, t_cN_b, blakeZissermanDf=0.0, timeOffsetPadding=0.0):
+        if self.dataset:
+            print()
+            print("Adding camera error terms ({0})".format(self.dataset.topic))
+
         #progress bar
         iProgress = sm.Progress2( len(self.targetObservations) )
         iProgress.sample()
 
         allReprojectionErrors = list()
         error_t = self.camera.reprojectionErrorType
-        
+
         for obs in self.targetObservations:
             # Build a transformation expression for the time.
             frameTime = self.cameraTimeToImuTimeDv.toExpression() + obs.time().toSec() + self.timeshiftCamToImuPrior
             frameTimeScalar = frameTime.toScalar()
-            
-            #as we are applying an initial time shift outside the optimization so 
+
+            #as we are applying an initial time shift outside the optimization so
             #we need to make sure that we dont add data outside the spline definition
             if frameTimeScalar <= poseSplineDv.spline().t_min() or frameTimeScalar >= poseSplineDv.spline().t_max():
                 continue
-            
+
             T_w_b = poseSplineDv.transformationAtTime(frameTime, timeOffsetPadding, timeOffsetPadding)
             T_b_w = T_w_b.inverse()
 
@@ -353,49 +389,68 @@ class IccCamera():
             #T_b_w: from world to imu coords
             #T_cN_b: from imu to camera N coords
             T_c_w = T_cN_b  * T_b_w
-            
-            #get the image and target points corresponding to the frame
-            imageCornerPoints =  np.array( obs.getCornersImageFrame() ).T
-            targetCornerPoints = np.array( obs.getCornersTargetFrame() ).T
-            
-            #setup an aslam frame (handles the distortion)
-            frame = self.camera.frameType()
-            frame.setGeometry(self.camera.geometry)
-            
-            #corner uncertainty
-            R = np.eye(2) * self.cornerUncertainty * self.cornerUncertainty
-            invR = np.linalg.inv(R)
-            
-            for pidx in range(0,imageCornerPoints.shape[1]):
-                #add all image points
-                k = self.camera.keypointType()
-                k.setMeasurement( imageCornerPoints[:,pidx] )
-                k.setInverseMeasurementCovariance(invR)
-                frame.addKeypoint(k)
-            
+
             reprojectionErrors=list()
-            for pidx in range(0,imageCornerPoints.shape[1]):
-                #add all target points
-                targetPoint = np.insert( targetCornerPoints.transpose()[pidx], 3, 1)
-                p = T_c_w *  aopt.HomogeneousExpression( targetPoint )
-             
-                #build and append the error term
-                rerr = error_t(frame, pidx, p)
-                
-                #add blake-zisserman m-estimator
-                if blakeZissermanDf>0.0:
-                    mest = aopt.BlakeZissermanMEstimator( blakeZissermanDf )
-                    rerr.setMEstimatorPolicy(mest)
-                
-                problem.addErrorTerm(rerr)  
+            if obs.target():
+                #get the image and target points corresponding to the frame
+                imageCornerPoints =  np.array( obs.getCornersImageFrame() ).T
+                targetCornerPoints = np.array( obs.getCornersTargetFrame() ).T
+
+                #setup an aslam frame (handles the distortion)
+                frame = self.camera.frameType()
+                frame.setGeometry(self.camera.geometry)
+
+                #corner uncertainty
+                R = np.eye(2) * self.cornerUncertainty * self.cornerUncertainty
+                invR = np.linalg.inv(R)
+
+                for pidx in range(0,imageCornerPoints.shape[1]):
+                    #add all image points
+                    k = self.camera.keypointType()
+                    k.setMeasurement( imageCornerPoints[:,pidx] )
+                    k.setInverseMeasurementCovariance(invR)
+                    frame.addKeypoint(k)
+
+                for pidx in range(0,imageCornerPoints.shape[1]):
+                    #add all target points
+                    targetPoint = np.insert( targetCornerPoints.transpose()[pidx], 3, 1)
+                    p = T_c_w *  aopt.HomogeneousExpression( targetPoint )
+
+                    #build and append the error term
+                    rerr = error_t(frame, pidx, p)
+
+                    #add blake-zisserman m-estimator
+                    if blakeZissermanDf>0.0:
+                        mest = aopt.BlakeZissermanMEstimator( blakeZissermanDf )
+                        rerr.setMEstimatorPolicy(mest)
+                problem.addErrorTerm(rerr)
                 reprojectionErrors.append(rerr)
-            
+            else:
+                #get the vision predicted omega and measured omega (IMU)
+                omega_predicted = T_c_w.toRotationExpression().inverse().toParametersRV()
+                #omega_predicted = R_c_w
+                omega_measured = sm.RotationVector().rotationMatrixToParameters(obs.T_t_c().T()[0:3,0:3])
+                #print(obs.time().toSec(), omega_measured, omega_predicted.toEuclidean())
+
+                #error term
+                rerr = ket.EuclideanError(omega_measured, np.eye(3,3) * 5e5/100, omega_predicted)
+                problem.addErrorTerm(rerr)
+                reprojectionErrors.append(rerr)
+
+                t_predicted = T_c_w.inverse().toEuclideanExpression()
+                #omega_predicted = R_c_w
+                t_measured = obs.T_t_c().T()[0:3,3].T
+
+                rerr = ket.EuclideanError(t_measured, np.eye(3,3) * 1.3e8/100, t_predicted)
+                problem.addErrorTerm(rerr)
+                reprojectionErrors.append(rerr)
+
             allReprojectionErrors.append(reprojectionErrors)
-                        
+
             #update progress bar
             iProgress.sample()
-            
-        print("\r  Added {0} camera error terms                      ".format( len(self.targetObservations) ))           
+
+        print("\r  Added {0} camera error terms                      ".format( len(self.targetObservations) ))
         self.allReprojectionErrors = allReprojectionErrors
 
 #pair of cameras with overlapping field of view (perfectly synced cams required!!)
@@ -417,66 +472,115 @@ class IccCameraChain():
         self.camList = []
         for camNr in range(0, chainConfig.numCameras()):
             camConfig = chainConfig.getCameraParameters(camNr)
-            dataset = initCameraBagDataset(parsed.bagfile[0], camConfig.getRosTopic(), \
+            if parsed.posesID < 0:
+                dataset = initCameraBagDataset(parsed.bagfile[0], camConfig.getRosTopic(), \
                                            parsed.bag_from_to, parsed.perform_synchronization)
-            
+            else:
+                dataset = ""
+
             #create the camera
-            self.camList.append( IccCamera( camConfig, 
-                                            targetConfig, 
-                                            dataset, 
+            self.camList.append( IccCamera( camConfig,
+                                            targetConfig,
+                                            dataset,
                                             #Ultimately, this should come from the camera yaml.
-                                            reprojectionSigma=parsed.reprojection_sigma, 
+                                            reprojectionSigma=parsed.reprojection_sigma,
                                             showCorners=parsed.showextraction,
-                                            showReproj=parsed.showextraction, 
-                                            showOneStep=parsed.extractionstepping) )  
-                
+                                            showReproj=parsed.showextraction,
+                                            showOneStep=parsed.extractionstepping) )
+
         self.chainConfig = chainConfig
-        
+
         #find and store time between first and last image over all cameras
-        self.findCameraTimespan()
-        
+        self.findCameraTimespan(parsed.posesID, parsed.bagfile[0], parsed.camposesfile)
+
         #use stereo calibration guess if no baselines are provided
         self.initializeBaselines()
-        
+
 
     def initializeBaselines(self):
-        #estimate baseline prior if no external guess is provided           
+        #estimate baseline prior if no external guess is provided
         for camNr in range(1, len(self.camList)):
             self.camList[camNr].T_extrinsic = self.chainConfig.getExtrinsicsLastCamToHere(camNr)
 
             print("Baseline between cam{0} and cam{1} set to:".format(camNr-1,camNr))
             print("T= ", self.camList[camNr].T_extrinsic.T())
             print("Baseline: ", np.linalg.norm(self.camList[camNr].T_extrinsic.t()), " [m]")
-   
+
     #initialize a pose spline for the chain
     def initializePoseSplineFromCameraChain(self, splineOrder=6, poseKnotsPerSecond=100, timeOffsetPadding=0.02):
         #use the main camera for the spline to initialize the poses
         return self.camList[0].initPoseSplineFromCamera(splineOrder, poseKnotsPerSecond, timeOffsetPadding)
 
     #find the timestamp for the first and last image considering all cameras in the chain
-    def findCameraTimespan(self):
+    def findCameraTimespan(self, posesID = -1, posesfile = "", camposesfile = ""):
         tStart = acv.Time( 0.0 )
         tEnd = acv.Time( 0.0 )
-        
-        for cam in self.camList:
-            if len(cam.targetObservations)>0:
-                tStartCam = cam.targetObservations[0].time()
-                tEndCam   = cam.targetObservations[-1].time()
-                
-                if tStart.toSec() > tStartCam.toSec():
-                    tStart = tStartCam
-                    
-                if tEndCam.toSec() > tEnd.toSec():
-                    tEnd = tEndCam
-        
-        self.timeStart = tStart
-        self.timeStart = tEnd
-         
-    #find/set orientation prior between first camera in chain and main IMU (imu0) 
-    def findOrientationPriorCameraChainToImu(self, imu):
-        self.camList[0].findOrientationPriorCameraToImu( imu )
 
-    #get an initial estimate of gravity in the world coordinate frame 
+        if posesID >= 0:
+            for cam in self.camList:
+                if camposesfile:
+                    print("TODO")
+                else:
+                    tm_pattern = None
+                    last_valid_tm = -1
+                    last_tm = -1
+                    with open(posesfile, "r") as f:
+                        bstarttm = 1
+                        lines = f.readlines()
+                        for lineid in range(len(lines)):
+                            line = lines[lineid]
+                            tm_pattern = re.match("timestamp:\s*(\d+)", line)
+                            if tm_pattern:
+                                last_tm = int(tm_pattern.group(1))
+                            pattern = re.match("Controller\s*(\d+)\s*State:\s*(\d+)", line)
+                            if pattern:
+                                if posesID == int(pattern.group(1)):
+                                    if 2 <= int(pattern.group(2)):
+                                        last_valid_tm = last_tm
+                                        if bstarttm:
+                                            tStart = acv.Time(float(last_valid_tm) * CoeffNanoToSecond)
+                                            bstarttm = 0
+                                        obs = acv.GridCalibrationTargetObservation()
+                                        obs.setTime(acv.Time(last_valid_tm * CoeffNanoToSecond))
+                                        #print(obs.time().toSec(), last_valid_tm * CoeffNanoToSecond)
+
+                                        lineid+=1
+                                        line = lines[lineid]
+                                        pattern = re.match("p:\s*(-*\d+\.*\d*e*-*\d+)\s*(-*\d+\.*\d*e*-*\d+)\s*(-*\d+\.*\d*e*-*\d+)\s*q:\s*(-*\d+\.*\d*e*-*\d+)\s*(-*\d+\.*\d*e*-*\d+)\s*(-*\d+\.*\d*e*-*\d+)", line)
+                                        #notice RotationVector() here map -theta*a^ to R, so we need to add - here
+                                        R = sm.RotationVector().parametersToRotationMatrix(-np.matrix([pattern.group(4),pattern.group(5),pattern.group(6)], dtype=np.float64).T)
+                                        t = np.matrix([pattern.group(1),pattern.group(2),pattern.group(3)], dtype=np.float64).T
+                                        #print(obs.time().toSec(), t.transpose(), sm.RotationVector().rotationMatrixToParameters(R))
+                                        Ttc = sm.Transformation(sm.rt2Transform(R, t))
+                                        obs.set_T_t_c(Ttc)
+                                        #print(obs.T_t_c().T())
+
+                                        cam.targetObservations.append(obs)
+                    if last_valid_tm >= 0:
+                        tEnd = acv.Time(float(last_valid_tm) * CoeffNanoToSecond)
+                    self.camList = [self.camList[0]]
+                    break
+        else:
+            for cam in self.camList:
+                if len(cam.targetObservations)>0:
+                    tStartCam = cam.targetObservations[0].time()
+                    tEndCam   = cam.targetObservations[-1].time()
+
+                    if tStart.toSec() > tStartCam.toSec():
+                        tStart = tStartCam
+
+                    if tEndCam.toSec() > tEnd.toSec():
+                        tEnd = tEndCam
+
+        self.timeStart = tStart
+        self.timeEnd = tEnd
+        print(self.timeStart.toSec(), self.timeEnd.toSec())
+
+    #find/set orientation prior between first camera in chain and main IMU (imu0)
+    def findOrientationPriorCameraChainToImu(self, imu, bfixed = False):
+        self.camList[0].findOrientationPriorCameraToImu( imu, bfixed )
+
+    #get an initial estimate of gravity in the world coordinate frame
     def getEstimatedGravity(self):
         return self.camList[0].getEstimatedGravity()
 
@@ -484,36 +588,36 @@ class IccCameraChain():
     def getResultBaseline(self, fromCamANr, toCamBNr):
         #transformation from cam a to b is always stored in the higer ID cam
         idx = np.max([fromCamANr, toCamBNr])
-        
+
         #get the transform from camNrmin to camNrmax
         T_cB_cA = sm.Transformation( self.camList[idx].T_c_b_Dv.T() )
-        
+
         #get the transformation direction right
         if fromCamANr > toCamBNr:
             T_cB_cA = T_cB_cA.inverse()
-        
+
         #calculate the metric baseline
         baseline = np.linalg.norm( T_cB_cA.t() )
-    
+
         return T_cB_cA, baseline
-    
+
     def getResultTrafoImuToCam(self, camNr):
         #trafo from imu to cam0 in the chain
         T_c0_i = sm.Transformation( self.camList[0].T_c_b_Dv.T() )
-        
+
         #add all the baselines along the chain up to our camera N
         T_cN_imu = T_c0_i
-        
+
         #now add all baselines starting from the second camera up to the desired one
         for cam in self.camList[1:camNr+1]:
             T_cNplus1_cN = sm.Transformation( cam.T_c_b_Dv.T() )
             T_cN_imu = T_cNplus1_cN*T_cN_imu
 
         return T_cN_imu
-    
+
     def getResultTimeShift(self, camNr):
         return self.camList[camNr].cameraTimeToImuTimeDv.toScalar() + self.camList[camNr].timeshiftCamToImuPrior
-    
+
     def addDesignVariables(self, problem, noTimeCalibration = True, noChainExtrinsics = True):
         #add the design variables (T(R,t) & time)  for all induvidual cameras
         for camNr, cam in enumerate( self.camList ):
@@ -525,28 +629,34 @@ class IccCameraChain():
                 noExtrinsics = noChainExtrinsics
                 baselinedv_group_id = ic.HELPER_GROUP_ID
             cam.addDesignVariables(problem, noExtrinsics, noTimeCalibration, baselinedv_group_id=baselinedv_group_id)
-    
+
     #add the reprojection error terms for all cameras in the chain
     def addCameraChainErrorTerms(self, problem, poseSplineDv, blakeZissermanDf=-1, timeOffsetPadding=0.0):
-        
+
         #add the induviduak error terms for all cameras
         for camNr, cam in enumerate(self.camList):
             #add error terms for the first chain element
             if camNr == 0:
                 #initialize the chain with first camerea ( imu to cam0)
                 T_chain = cam.T_c_b_Dv.toExpression()
+                R_chain = cam.T_c_b_Dv.q.toExpression()
+                t_chain = cam.T_c_b_Dv.t.toExpression()
             else:
                 T_chain = cam.T_c_b_Dv.toExpression() * T_chain
-            
+                R_chain = cam.R_c_b_Dv.toExpression() * R_chain
+                t_chain = cam.R_c_b_Dv.toExpression() * t_chain + cam.T_c_b_Dv.t.toExpression()
+
             #from imu coords to camerea N coords (as DVs)
             T_cN_b = T_chain
-            
+            R_cN_b = R_chain
+            t_cN_b = t_chain
+
             #add the error terms
-            cam.addCameraErrorTerms( problem, poseSplineDv, T_cN_b, blakeZissermanDf, timeOffsetPadding )
+            cam.addCameraErrorTerms( problem, poseSplineDv, T_cN_b, R_cN_b, t_cN_b, blakeZissermanDf, timeOffsetPadding)
 
 #IMU
 class IccImu(object):
-    
+
     class ImuParameters(kc.ImuParameters):
         def __init__(self, imuConfig):
             kc.ImuParameters.__init__(self, '', True)
@@ -587,25 +697,28 @@ class IccImu(object):
         #store input
         self.imuConfig = self.ImuParameters(imuConfig)
 
-        #load dataset
-        self.dataset = initImuBagDataset(parsed.bagfile[0], imuConfig.getRosTopic(), \
+        if parsed.posesID < 0:
+            #load dataset
+            self.dataset = initImuBagDataset(parsed.bagfile[0], imuConfig.getRosTopic(), \
                                          parsed.bag_from_to, parsed.perform_synchronization)
-        
+        else:
+            self.dataset = None
+
         #statistics
         self.accelUncertaintyDiscrete, self.accelRandomWalk, self.accelUncertainty = self.imuConfig.getAccelerometerStatistics()
         self.gyroUncertaintyDiscrete, self.gyroRandomWalk, self.gyroUncertainty = self.imuConfig.getGyroStatistics()
-        
+
         #init GyroBiasPrior (+ count for recursive averaging if we have more than 1 measurement = >1 cameras)
         self.GyroBiasPrior = np.array([0,0,0])
         self.GyroBiasPriorCount = 0
-        
+
         #load the imu dataset
-        self.loadImuData()
+        self.loadImuData(parsed.imusfile, parsed.posesID, parsed.bag_from_to)
 
         #initial estimates for multi IMU calibration
-        self.q_i_b_prior = np.array([0., 0., 0., 1.]) 
+        self.q_i_b_prior = np.array([0., 0., 0., 1.])
         self.timeOffset = 0.0
-        
+
     class ImuMeasurement(object):
         def __init__(self, stamp, omega, alpha, Rgyro, Raccel):
             self.omega = omega
@@ -615,39 +728,62 @@ class IccImu(object):
             self.alphaR = Raccel
             self.alphaInvR = np.linalg.inv(Raccel)
             self.stamp = stamp
-        
-    def loadImuData(self):
-        print("Reading IMU data ({0})".format(self.dataset.topic))
-            
-        # prepare progess bar
-        iProgress = sm.Progress2( self.dataset.numMessages() )
-        iProgress.sample()
-        
+
+    def loadImuData(self, imusfile = "", posesID = -1, from_to = None):
+        if not imusfile:
+            print("Reading IMU data ({0})".format(self.dataset.topic))
+
+            # prepare progess bar
+            iProgress = sm.Progress2( self.dataset.numMessages() )
+            iProgress.sample()
+
         Rgyro = np.eye(3) * self.gyroUncertaintyDiscrete * self.gyroUncertaintyDiscrete
         Raccel = np.eye(3) * self.accelUncertaintyDiscrete * self.accelUncertaintyDiscrete
-        
+
         # Now read the imu measurements.
         imu = []
-        for timestamp, omega, alpha in self.dataset:
-            timestamp = acv.Time( timestamp.toSec() ) 
-            imu.append( self.ImuMeasurement(timestamp, omega, alpha, Rgyro, Raccel) )
-            iProgress.sample()
-        
+        if from_to:
+            bag_from_to = from_to
+            # some value checking
+            if bag_from_to[0] >= bag_from_to[1]:
+                raise RuntimeError("Bag start time must be less than end time.".format(bag_from_to[0]))
+            if bag_from_to[0] < 0.0:
+                sm.logWarn("Bag start time of {0} s is smaller 0".format(bag_from_to[0]))
+        if not imusfile:
+            for timestamp, omega, alpha in self.dataset:
+                timestamp = acv.Time( timestamp.toSec() )
+                imu.append( self.ImuMeasurement(timestamp, omega, alpha, Rgyro, Raccel) )
+                iProgress.sample()
+        else:
+            with open(imusfile, "r") as f:
+                f.readline()
+                for line in f.readlines():
+                    #line = line.strip('\n')
+                    #print(line)
+                    arr_info = np.array([int(s) for s in re.findall(r'.*?\d+', line)])
+                    if arr_info[1] == posesID :
+                        CoeffIMU32Or16G = 1.0
+                        timestamp = arr_info[0] * CoeffNanoToSecond
+                        omega = np.array([arr_info[5], arr_info[6], arr_info[7]]) * 2000 * np.pi / 180 / 32768 * CoeffIMU32Or16G
+                        acc = np.array([arr_info[2], arr_info[3], arr_info[4]]) * 9.807 / 2048 * CoeffIMU32Or16G
+                        if not from_to or (timestamp>=from_to[0] and timestamp<=from_to[1]):
+                            imu.append(self.ImuMeasurement(acv.Time(timestamp), omega, acc, Rgyro, Raccel))
+
         self.imuData = imu
-        
+
         if len(self.imuData)>1:
             print("\r  Read %d imu readings over %.1f seconds                   " \
                     % (len(imu), imu[-1].stamp.toSec() - imu[0].stamp.toSec()))
         else:
             sm.logFatal("Could not find any IMU messages. Please check the dataset.")
             sys.exit(-1)
-            
-            
+
+
     def addDesignVariables(self, problem):
         #create design variables
         self.gyroBiasDv = asp.EuclideanBSplineDesignVariable( self.gyroBias )
         self.accelBiasDv = asp.EuclideanBSplineDesignVariable( self.accelBias )
-        
+
         ic.addSplineDesignVariables(problem, self.gyroBiasDv, setActive=True, \
                                     group_id=ic.HELPER_GROUP_ID)
         ic.addSplineDesignVariables(problem, self.accelBiasDv, setActive=True, \
@@ -666,23 +802,26 @@ class IccImu(object):
 
     def addAccelerometerErrorTerms(self, problem, poseSplineDv, g_w, mSigma=0.0, \
                                    accelNoiseScale=1.0):
-        print()
-        print("Adding accelerometer error terms ({0})".format(self.dataset.topic))
-        
+        if self.dataset:
+            print()
+            print("Adding accelerometer error terms ({0})".format(self.dataset.topic))
+        else:
+            print("Adding acc err terms")
+
         #progress bar
         iProgress = sm.Progress2( len(self.imuData) )
         iProgress.sample()
-        
+
         # AccelerometerError(measurement,  invR,  C_b_w,  acceleration_w,  bias,  g_w)
         weight = 1.0/accelNoiseScale
         accelErrors = []
         num_skipped = 0
-        
+
         if mSigma > 0.0:
             mest = aopt.HuberMEstimator(mSigma)
         else:
             mest = aopt.NoMEstimator()
-            
+
         for im in self.imuData:
             tk = im.stamp.toSec() + self.timeOffset
             if tk > poseSplineDv.spline().t_min() and tk < poseSplineDv.spline().t_max():
@@ -710,9 +849,12 @@ class IccImu(object):
 
     def addGyroscopeErrorTerms(self, problem, poseSplineDv, mSigma=0.0, gyroNoiseScale=1.0, \
                                g_w=None):
-        print()
-        print("Adding gyroscope error terms ({0})".format(self.dataset.topic))
-        
+        if self.dataset:
+            print()
+            print("Adding gyroscope error terms ({0})".format(self.dataset.topic))
+        else:
+            print("Adding gyro err terms")
+
         #progress bar
         iProgress = sm.Progress2( len(self.imuData) )
         iProgress.sample()
@@ -724,7 +866,7 @@ class IccImu(object):
             mest = aopt.HuberMEstimator(mSigma)
         else:
             mest = aopt.NoMEstimator()
-            
+
         for im in self.imuData:
             tk = im.stamp.toSec() + self.timeOffset
             if tk > poseSplineDv.spline().t_min() and tk < poseSplineDv.spline().t_max():
@@ -743,7 +885,7 @@ class IccImu(object):
             #update progress bar
             iProgress.sample()
 
-        print("\r  Added {0} of {1} gyroscope error terms (skipped {2} out-of-bounds measurements)".format( len(self.imuData)-num_skipped, len(self.imuData), num_skipped ))           
+        print("\r  Added {0} of {1} gyroscope error terms (skipped {2} out-of-bounds measurements)".format( len(self.imuData)-num_skipped, len(self.imuData), num_skipped ))
         self.gyroErrors = gyroErrors
 
     def initBiasSplines(self, poseSpline, splineOrder, biasKnotsPerSecond):
@@ -751,17 +893,17 @@ class IccImu(object):
         end = poseSpline.t_max();
         seconds = end - start;
         knots = int(round(seconds * biasKnotsPerSecond))
-        
+
         print()
         print("Initializing the bias splines with %d knots" % (knots))
-        
+
         #initialize the bias splines
         self.gyroBias = bsplines.BSpline(splineOrder)
         self.gyroBias.initConstantSpline(start,end,knots, self.GyroBiasPrior )
-        
+
         self.accelBias = bsplines.BSpline(splineOrder)
         self.accelBias.initConstantSpline(start,end,knots, np.zeros(3))
-        
+
     def addBiasMotionTerms(self, problem):
         Wgyro = np.eye(3) / (self.gyroRandomWalk * self.gyroRandomWalk)
         Waccel =  np.eye(3) / (self.accelRandomWalk * self.accelRandomWalk)
@@ -769,7 +911,7 @@ class IccImu(object):
         problem.addErrorTerm(gyroBiasMotionErr)
         accelBiasMotionErr = asp.BSplineEuclideanMotionError(self.accelBiasDv, Waccel, 1)
         problem.addErrorTerm(accelBiasMotionErr)
-        
+
     def getTransformationFromBodyToImu(self):
         if self.isReferenceImu:
             return sm.Transformation()
@@ -777,10 +919,10 @@ class IccImu(object):
                                  np.dot(self.q_i_b_Dv.toRotationMatrix(), \
                                         self.r_b_Dv.toEuclidean()))
 
-    def findOrientationPrior(self, referenceImu):
+    def findOrientationPrior(self, referenceImu, bfixed = False):
         print()
         print("Estimating imu-imu rotation initial guess.")
-        
+
         # build the problem
         problem = aopt.OptimizationProblem()
 
@@ -811,18 +953,18 @@ class IccImu(object):
 
         for im in referenceImu.imuData:
             tk = im.stamp.toSec()
-            if tk > angularVelocity.t_min() and tk < angularVelocity.t_max():        
+            if tk > angularVelocity.t_min() and tk < angularVelocity.t_max():
                 #DV expressions
-                bias = referenceGyroBiasDv.toExpression()   
-                
+                bias = referenceGyroBiasDv.toExpression()
+
                 omega_predicted = angularVelocityDv.toEuclideanExpression(tk, 0)
                 omega_measured = im.omega
-                
+
                 #error term
                 gerr = ket.GyroscopeError(im.omega, im.omegaInvR, omega_predicted, bias)
                 problem.addErrorTerm(gerr)
-            
-        #define the optimization 
+
+        #define the optimization
         options = aopt.Optimizer2Options()
         options.verbose = False
         options.linearSolver = aopt.BlockCholeskyLinearSystemSolver()
@@ -834,9 +976,10 @@ class IccImu(object):
         #run the optimization
         optimizer = aopt.Optimizer2(options)
         optimizer.setProblem(problem)
-        
+
         try:
-            optimizer.optimize()
+            if not bfixed:
+                optimizer.optimize()
         except:
             sm.logFatal("Failed to obtain initial guess for the relative orientation!")
             sys.exit(-1)
@@ -856,7 +999,7 @@ class IccImu(object):
                         "Please make sure that the sensors are synchronized correctly." \
                         .format(referenceImu.imuConfig.getRosTopic(), self.imuConfig.getRosTopic()))
             sys.exit(-1)
-         
+
         #get the time shift
         corr = np.correlate(referenceAbsoluteOmega(), absoluteOmega(), "full")
         discrete_shift = corr.argmax() - (np.size(absoluteOmega()) - 1)
@@ -864,7 +1007,7 @@ class IccImu(object):
         times = [im.stamp.toSec() for im in self.imuData]
         dT = np.mean(np.diff( times ))
         shift = discrete_shift*dT
-        
+
         if self.estimateTimedelay and not self.isReferenceImu:
             #refine temporal offset only when used.
             objectiveFunction = lambda dt: np.linalg.norm(referenceAbsoluteOmega(dt) - absoluteOmega(dt))**2
@@ -882,14 +1025,14 @@ class IccImu(object):
 
         for im in self.imuData:
             tk = im.stamp.toSec() + self.timeOffset
-            if tk > angularVelocity.t_min() and tk < angularVelocity.t_max():        
+            if tk > angularVelocity.t_min() and tk < angularVelocity.t_max():
                 #DV expressions
                 C_i_b = q_i_b_Dv.toExpression()
-                bias = gyroBiasDv.toExpression()   
-                
+                bias = gyroBiasDv.toExpression()
+
                 omega_predicted = C_i_b * angularVelocityDv.toEuclideanExpression(tk, 0)
                 omega_measured = im.omega
-                
+
                 #error term
                 gerr = ket.GyroscopeError(im.omega, im.omegaInvR, omega_predicted, bias)
                 problem.addErrorTerm(gerr)
@@ -905,8 +1048,8 @@ class IccImu(object):
         print(q_i_b_Dv.toRotationMatrix())
 
         self.q_i_b_prior = sm.r2quat(q_i_b_Dv.toRotationMatrix())
-        
-        
+
+
 class IccScaledMisalignedImu(IccImu):
 
     class ImuParameters(IccImu.ImuParameters):
@@ -942,7 +1085,7 @@ class IccScaledMisalignedImu(IccImu):
                                             self.q_gyro_i_Dv.toRotationMatrix(), \
                                             self.M_gyro_Dv.toMatrix3x3(), \
                                             self.M_accel_gyro_Dv.toMatrix3x3())
-        
+
     def addDesignVariables(self, problem):
         IccImu.addDesignVariables(self, problem)
 
@@ -954,35 +1097,38 @@ class IccScaledMisalignedImu(IccImu):
                                                                  dtype=int))
         problem.addDesignVariable(self.M_accel_Dv, ic.HELPER_GROUP_ID)
         self.M_accel_Dv.setActive(True)
-        
+
         self.M_gyro_Dv = aopt.MatrixBasicDv(np.eye(3), np.array([[1, 0, 0],[1, 1, 0],[1, 1, 1]], \
                                                                 dtype=int))
         problem.addDesignVariable(self.M_gyro_Dv, ic.HELPER_GROUP_ID)
         self.M_gyro_Dv.setActive(True)
-        
+
         self.M_accel_gyro_Dv = aopt.MatrixBasicDv(np.zeros((3,3)),np.ones((3,3),dtype=int))
         problem.addDesignVariable(self.M_accel_gyro_Dv, ic.HELPER_GROUP_ID)
         self.M_accel_gyro_Dv.setActive(True)
 
     def addAccelerometerErrorTerms(self, problem, poseSplineDv, g_w, mSigma=0.0, \
                                    accelNoiseScale=1.0):
-        print()
-        print("Adding accelerometer error terms ({0})".format(self.dataset.topic))
-        
+        if self.dataset:
+            print()
+            print("Adding accelerometer error terms ({0})".format(self.dataset.topic))
+        else:
+            print("Adding acc err terms ScaledMisaligned")
+
         #progress bar
         iProgress = sm.Progress2( len(self.imuData) )
         iProgress.sample()
-        
+
         # AccelerometerError(measurement,  invR,  C_b_w,  acceleration_w,  bias,  g_w)
         weight = 1.0/accelNoiseScale
         accelErrors = []
         num_skipped = 0
-        
+
         if mSigma > 0.0:
             mest = aopt.HuberMEstimator(mSigma)
         else:
             mest = aopt.NoMEstimator()
-            
+
         for im in self.imuData:
             tk = im.stamp.toSec() + self.timeOffset
             if tk > poseSplineDv.spline().t_min() and tk < poseSplineDv.spline().t_max():
@@ -1011,9 +1157,12 @@ class IccScaledMisalignedImu(IccImu):
         self.accelErrors = accelErrors
 
     def addGyroscopeErrorTerms(self, problem, poseSplineDv, mSigma=0.0, gyroNoiseScale=1.0, g_w=None):
-        print()
-        print("Adding gyroscope error terms ({0})".format(self.dataset.topic))
-        
+        if self.dataset:
+            print()
+            print("Adding gyroscope error terms ({0})".format(self.dataset.topic))
+        else:
+            print("Adding gyro err terms ScaledMisaligned")
+
         #progress bar
         iProgress = sm.Progress2( len(self.imuData) )
         iProgress.sample()
@@ -1025,7 +1174,7 @@ class IccScaledMisalignedImu(IccImu):
             mest = aopt.HuberMEstimator(mSigma)
         else:
             mest = aopt.NoMEstimator()
-            
+
         for im in self.imuData:
             tk = im.stamp.toSec() + self.timeOffset
             if tk > poseSplineDv.spline().t_min() and tk < poseSplineDv.spline().t_max():
@@ -1056,7 +1205,7 @@ class IccScaledMisalignedImu(IccImu):
             #update progress bar
             iProgress.sample()
 
-        print("\r  Added {0} of {1} gyroscope error terms (skipped {2} out-of-bounds measurements)".format( len(self.imuData)-num_skipped, len(self.imuData), num_skipped ))           
+        print("\r  Added {0} of {1} gyroscope error terms (skipped {2} out-of-bounds measurements)".format( len(self.imuData)-num_skipped, len(self.imuData), num_skipped ))
         self.gyroErrors = gyroErrors
 
 class IccScaledMisalignedSizeEffectImu(IccScaledMisalignedImu):
@@ -1096,7 +1245,7 @@ class IccScaledMisalignedSizeEffectImu(IccScaledMisalignedImu):
         self.rx_i_Dv = aopt.EuclideanPointDv(np.array([0., 0., 0.]))
         problem.addDesignVariable(self.rx_i_Dv, ic.HELPER_GROUP_ID)
         self.rx_i_Dv.setActive(False)
-        
+
         self.ry_i_Dv = aopt.EuclideanPointDv(np.array([0., 0., 0.]))
         problem.addDesignVariable(self.ry_i_Dv, ic.HELPER_GROUP_ID)
         self.ry_i_Dv.setActive(True)
@@ -1117,23 +1266,26 @@ class IccScaledMisalignedSizeEffectImu(IccScaledMisalignedImu):
 
     def addAccelerometerErrorTerms(self, problem, poseSplineDv, g_w, mSigma=0.0, \
                                    accelNoiseScale=1.0):
-        print()
-        print("Adding accelerometer error terms ({0})".format(self.dataset.topic))
-        
+        if self.dataset:
+            print()
+            print("Adding accelerometer error terms ({0})".format(self.dataset.topic))
+        else:
+            print("Adding acc err terms ScaledMisalignedSizeEffect")
+
         #progress bar
         iProgress = sm.Progress2( len(self.imuData) )
         iProgress.sample()
-        
+
         # AccelerometerError(measurement,  invR,  C_b_w,  acceleration_w,  bias,  g_w)
         weight = 1.0/accelNoiseScale
         accelErrors = []
         num_skipped = 0
-        
+
         if mSigma > 0.0:
             mest = aopt.HuberMEstimator(mSigma)
         else:
             mest = aopt.NoMEstimator()
-            
+
         for im in self.imuData:
             tk = im.stamp.toSec() + self.timeOffset
             if tk > poseSplineDv.spline().t_min() and tk < poseSplineDv.spline().t_max():
@@ -1150,7 +1302,7 @@ class IccScaledMisalignedSizeEffectImu(IccScaledMisalignedImu):
                 Ix = self.Ix_Dv.toExpression()
                 Iy = self.Iy_Dv.toExpression()
                 Iz = self.Iz_Dv.toExpression()
-                
+
                 a = M * (C_i_b * (C_b_w * (a_w - g_w)) + \
                          Ix * (C_i_b * (w_dot_b.cross(rx_b) + w_b.cross(w_b.cross(rx_b)))) + \
                          Iy * (C_i_b * (w_dot_b.cross(ry_b) + w_b.cross(w_b.cross(ry_b)))) + \
