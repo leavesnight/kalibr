@@ -35,6 +35,7 @@ namespace aslam {
       Eigen::Matrix3d toRotationMatrix();
 
       EuclideanExpression toParameters(sm::kinematics::RotationalKinematics::Ptr rk);
+      EuclideanExpression toParametersRV();
       
       /// \brief return the expression that inverts the rotation.
       RotationExpression inverse();

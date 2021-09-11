@@ -78,6 +78,7 @@ class IccCalibrator(object):
                       gyroNoiseScale=1.0,
                       accelNoiseScale=1.0,
                       timeOffsetPadding=0.02,
+                      bfixed=False,
                       verbose=False  ):
 
         print("\tSpline order: %d" % (splineOrder))
@@ -106,7 +107,7 @@ class IccCalibrator(object):
         
         #obtain orientation prior between main imu and camera chain (if no external input provided)
         #and initial estimate for the direction of gravity
-        self.CameraChain.findOrientationPriorCameraChainToImu(self.ImuList[0])
+        self.CameraChain.findOrientationPriorCameraChainToImu(self.ImuList[0], bfixed)
         estimatedGravity = self.CameraChain.getEstimatedGravity()
 
         ############################################
@@ -114,7 +115,7 @@ class IccCalibrator(object):
         ############################################
         #initialize a pose spline using the camera poses in the camera chain
         poseSpline = self.CameraChain.initializePoseSplineFromCameraChain(splineOrder, poseKnotsPerSecond, timeOffsetPadding)
-        
+
         # Initialize bias splines for all IMUs
         for imu in self.ImuList:
             imu.initBiasSplines(poseSpline, splineOrder, biasKnotsPerSecond)
@@ -124,7 +125,7 @@ class IccCalibrator(object):
 
         # Initialize all design variables.
         self.initDesignVariables(problem, poseSpline, noTimeCalibration, noChainExtrinsics, initialGravityEstimate = estimatedGravity)
-        
+
         ############################################
         ## add error terms
         ############################################

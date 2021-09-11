@@ -2,6 +2,7 @@
 #include <aslam/backend/RotationExpressionNode.hpp>
 #include <aslam/backend/EuclideanExpressionNode.hpp>
 #include <sm/boost/null_deleter.hpp>
+#include "sm/kinematics/RotationVector.hpp"
 
 namespace aslam {
   namespace backend {
@@ -84,6 +85,11 @@ namespace aslam {
     }
     
   EuclideanExpression RotationExpression::toParameters(sm::kinematics::RotationalKinematics::Ptr rk) {
+    boost::shared_ptr<EuclideanExpressionNode> een( new EuclideanExpressionNodeRotationParameters(_root, rk));
+    return EuclideanExpression(een);
+  }
+  EuclideanExpression RotationExpression::toParametersRV() {
+    sm::kinematics::RotationalKinematics::Ptr rk = sm::kinematics::RotationalKinematics::Ptr(new sm::kinematics::RotationVector());
     boost::shared_ptr<EuclideanExpressionNode> een( new EuclideanExpressionNodeRotationParameters(_root, rk));
     return EuclideanExpression(een);
   }
