@@ -44,7 +44,7 @@ def initImuBagDataset(bagfile, topic, from_to=None, perform_synchronization=Fals
 #mono camera
 class IccCamera():
     def __init__(self, camConfig, targetConfig, dataset, reprojectionSigma=1.0, showCorners=True, \
-                 showReproj=True, showOneStep=False):
+                 showReproj=True, showOneStep=False, saveCorners=False):
 
         #store the configuration
         self.dataset = dataset
@@ -64,7 +64,7 @@ class IccCamera():
         self.camera = kc.AslamCamera.fromParameters( camConfig )
 
         #extract corners
-        self.setupCalibrationTarget( targetConfig, showExtraction=showCorners, showReproj=showReproj, imageStepping=showOneStep )
+        self.setupCalibrationTarget( targetConfig, showExtraction=showCorners, showReproj=showReproj, imageStepping=showOneStep, saveCorners=saveCorners )
         multithreading = not (showCorners or showReproj or showOneStep)
         if self.dataset:
             self.targetObservations = kc.extractCornersFromDataset(self.dataset, self.detector, multithreading=multithreading)
@@ -74,7 +74,8 @@ class IccCamera():
         #an estimate of the gravity in the world coordinate frame
         self.gravity_w = np.array([GravityNorm, 0., 0.])
 
-    def setupCalibrationTarget(self, targetConfig, showExtraction=False, showReproj=False, imageStepping=False):
+    def setupCalibrationTarget(self, targetConfig, showExtraction=False, showReproj=False, imageStepping=False,
+                               saveCorners=False):
 
         #load the calibration target configuration
         targetParams = targetConfig.getTargetParams()
@@ -96,6 +97,7 @@ class IccCamera():
         elif targetType == 'circlegrid':
             options = acv.CirclegridOptions()
             options.showExtractionVideo = showExtraction
+            options.saveExtractionVideo = saveCorners
             options.useAsymmetricCirclegrid = targetParams['asymmetricGrid']
             grid = acv.GridCalibrationTargetCirclegrid(targetParams['targetRows'],
                                                           targetParams['targetCols'],
@@ -488,7 +490,8 @@ class IccCameraChain():
                                             reprojectionSigma=parsed.reprojection_sigma,
                                             showCorners=parsed.showextraction,
                                             showReproj=parsed.showextraction,
-                                            showOneStep=parsed.extractionstepping) )
+                                            showOneStep=parsed.extractionstepping,
+                                            saveCorners=parsed.saveextraction) )
 
         self.chainConfig = chainConfig
 

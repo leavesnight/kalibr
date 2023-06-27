@@ -275,6 +275,7 @@ void exportGridCalibration() {
   class_<GridCalibrationTargetCirclegrid::CirclegridOptions>("CirclegridOptions", init<>())
     .def_readwrite("useAsymmetricCirclegrid", &GridCalibrationTargetCirclegrid::CirclegridOptions::useAsymmetricCirclegrid)
     .def_readwrite("showExtractionVideo", &GridCalibrationTargetCirclegrid::CirclegridOptions::showExtractionVideo)
+    .def_readwrite("saveExtractionVideo", &GridCalibrationTargetCirclegrid::CirclegridOptions::saveExtractionVideo)
     .def_pickle(sm::python::pickle_suite<GridCalibrationTargetCirclegrid::CirclegridOptions>());
 
 

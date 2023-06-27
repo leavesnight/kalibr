@@ -29,7 +29,7 @@ class OptimizationDiverged(Exception):
     pass
 
 class CameraGeometry(object):
-    def __init__(self, cameraModel, targetConfig, dataset, geometry=None, verbose=False):
+    def __init__(self, cameraModel, targetConfig, dataset, geometry=None, verbose=False, saveCorners=False):
         self.dataset = dataset
         
         self.model = cameraModel
@@ -45,7 +45,7 @@ class CameraGeometry(object):
         self.isGeometryInitialized = False
 
         #create target detector
-        self.ctarget = TargetDetector(targetConfig, self.geometry, showCorners=verbose)
+        self.ctarget = TargetDetector(targetConfig, self.geometry, showCorners=verbose, saveCorners=saveCorners)
 
     def setDvActiveStatus(self, projectionActive, distortionActive, shutterActice):
         self.dv.projectionDesignVariable().setActive(projectionActive)
@@ -74,7 +74,8 @@ class CameraGeometry(object):
         return success
 
 class TargetDetector(object):
-    def __init__(self, targetConfig, cameraGeometry, showCorners=False, showReproj=False, showOneStep=False):
+    def __init__(self, targetConfig, cameraGeometry, showCorners=False, showReproj=False, showOneStep=False,
+                 saveCorners=False):
         self.targetConfig = targetConfig
         
         #initialize the calibration target
@@ -98,6 +99,7 @@ class TargetDetector(object):
         elif targetType == 'circlegrid':
             options = acv.CirclegridOptions()
             options.showExtractionVideo = showCorners
+            options.saveExtractionVideo = saveCorners
             options.useAsymmetricCirclegrid = targetParams['asymmetricGrid']
             
             self.grid = acv.GridCalibrationTargetCirclegrid(targetParams['targetRows'],

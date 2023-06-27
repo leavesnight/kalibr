@@ -31,6 +31,7 @@ class GridCalibrationTargetCirclegrid : public GridCalibrationTargetBase {
 
     /// \brief show extracted corners
     bool showExtractionVideo;
+    bool saveExtractionVideo = false;
 
     /// \brief Serialization support
     enum {CLASS_SERIALIZATION_VERSION = 1};
@@ -40,12 +41,14 @@ class GridCalibrationTargetCirclegrid : public GridCalibrationTargetBase {
     {
        ar << BOOST_SERIALIZATION_NVP(useAsymmetricCirclegrid);
        ar << BOOST_SERIALIZATION_NVP(showExtractionVideo);
+       ar << BOOST_SERIALIZATION_NVP(saveExtractionVideo);
     }
     template<class Archive>
     void load(Archive & ar, const unsigned int /*version*/)
     {
        ar >> BOOST_SERIALIZATION_NVP(useAsymmetricCirclegrid);
        ar >> BOOST_SERIALIZATION_NVP(showExtractionVideo);
+       ar >> BOOST_SERIALIZATION_NVP(saveExtractionVideo);
     }
   };
 

@@ -102,6 +102,8 @@ def __parseArgs():
     outputSettings = parser.add_argument_group('Output options')
     outputSettings.add_argument('--verbose', action='store_true', dest='verbose', help='Enable (really) verbose output (disables plots).')
     outputSettings.add_argument('--show-extraction', action='store_true', dest='showextraction', help='Show the calibration target extraction. (disables plots).')
+    outputSettings.add_argument('--save-extraction', action='store_true', dest='saveextraction', help='Save the calibration target extraction to ./tmp/(success else)./tmp_fail/.'
+                                                                                                      ' (requiring showextraction or verbose)')
 
     # print help if no argument is specified
     if len(sys.argv)==1:
@@ -140,7 +142,8 @@ def main():
 
     #create camera
     cameraModel = cameraModels[parsed.model]
-    cameraGeometry = kcc.CameraGeometry(cameraModel, targetConfig, dataset, verbose=(parsed.verbose or parsed.showextraction))
+    cameraGeometry = kcc.CameraGeometry(cameraModel, targetConfig, dataset, verbose=(parsed.verbose or parsed.showextraction),
+                                        saveCorners=parsed.saveextraction)
 
     # extract observations of the targets
     multithreading = not (parsed.verbose or parsed.showextraction)

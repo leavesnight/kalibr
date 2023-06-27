@@ -89,6 +89,16 @@ bool GridCalibrationTargetCirclegrid::computeObservation(const cv::Mat & image,
 
     cv::imshow("Circlegrid corners", imageCopy1);  // OpenCV call
     cv::waitKey(1);
+    if (_options.saveExtractionVideo) {
+      static size_t id_img = 0;
+      if (success) {
+        cv::imwrite("./tmp/" + std::to_string(id_img) + ".jpg", imageCopy1);
+      } else {
+        cv::imwrite("./tmp_fail/" + std::to_string(id_img) + ".jpg",
+                    imageCopy1);
+      }
+      ++id_img;
+    }
   }
 
   //exit here if there is an error

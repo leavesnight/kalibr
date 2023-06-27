@@ -108,6 +108,8 @@ def parseArgs():
     outputSettings = parser.add_argument_group('Output options')
     outputSettings.add_argument('--verbose', action='store_true', dest='verbose', help='Enable (really) verbose output (disables plots)')
     outputSettings.add_argument('--show-extraction', action='store_true', dest='showextraction', help='Show the calibration target extraction. (disables plots)')
+    outputSettings.add_argument('--save-extraction', action='store_true', dest='saveextraction', help='Save the calibration target extraction to ./tmp/(success else)./tmp_fail/.'
+                                                                                                      ' (requiring showextraction or verbose)')
     outputSettings.add_argument('--plot', action='store_true', dest='plot', help='Plot during calibration (this could be slow).')
     outputSettings.add_argument('--dont-show-report', action='store_true', dest='dontShowReport', help='Do not show the report on screen after calibration.')
     outputSettings.add_argument('--export-poses', action='store_true', dest='exportPoses', help='Export the optimized poses into a CSV (time_ns, position, quaterion)')
@@ -172,7 +174,8 @@ def main():
         
             #create camera
             cameraModel = cameraModels[modelName]
-            cam = kcc.CameraGeometry(cameraModel, targetConfig, dataset, verbose=(parsed.verbose or parsed.showextraction))
+            cam = kcc.CameraGeometry(cameraModel, targetConfig, dataset, verbose=(parsed.verbose or parsed.showextraction),
+                                     saveCorners=parsed.saveextraction)
                 
             #extract the targets
             multithreading = not (parsed.verbose or parsed.showextraction)
