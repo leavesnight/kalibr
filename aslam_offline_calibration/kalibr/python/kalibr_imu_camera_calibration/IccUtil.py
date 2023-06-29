@@ -319,7 +319,17 @@ def printResultTxt(cself, stream=sys.stdout):
             print(T.T(), file=stream)
             print("baseline norm: ", baseline,  "[m]", file=stream)
             print("", file=stream)
-    
+            print("Baseline (cam{0} to cam{1})/T_cam{1}cam{0}: ".format(camNr+1, camNr), file=stream)
+            print(T.inverse().T(), file=stream)
+            print("", file=stream)
+            if camNr > 0:
+                print("Baseline (cam{0} to cam{1})/T_cam{1}cam{0}: ".format(camNr+1, 0), file=stream)
+                T0last = T0last * T.inverse()
+                print(T0last.T(), file=stream)
+                print("", file=stream)
+            else:
+                T0last = T.inverse()
+
     # Gravity
     print("", file=stream)
     print("Gravity vector in target coords: [m/s^2]", file=stream)
